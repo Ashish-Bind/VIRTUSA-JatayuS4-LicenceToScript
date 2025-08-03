@@ -1,0 +1,11 @@
+venv
+/.dump
+/backend/app/static
+/backend/keys
+/backend/.env
+**/__pycache__/
+*.pyc 
+__pycache__/ 
+*.py[cod]
+/question_batches
+KnowledgeBase.sql

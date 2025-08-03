@@ -1,0 +1,50 @@
+name: quizzer
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: quizzer-frontend
+    ports:
+      - '5173:80'
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8080/api
+    develop:
+      watch:
+        - path: ./frontend/package.json
+          action: rebuild
+        - path: ./frontend
+          target: /app
+          action: sync
+    depends_on:
+      - flask-app
+
+  flask-app:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    container_name: quizzer-backend
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./backend/keys/gcp-key.json:/app/keys/gcp-key.json
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:17
+    container_name: quizzer-postgres
+    environment:
+      POSTGRES_DB: KnowledgeBase
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234!@#$
+    ports:
+      - '5431:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
