@@ -19,7 +19,7 @@ const AssessmentMessages = ({
         onCopy={(e) => preventCopyPaste(e, () => {})}
         onPaste={(e) => preventCopyPaste(e, () => {})}
         onCut={(e) => preventCopyPaste(e, () => {})}
-        className="bg-gradient-to-br from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 p-6 rounded-lg shadow-inner border border-indigo-200 dark:border-indigo-800 h-[calc(100vh-4rem)] overflow-y-auto mb-6"
+        className="bg-gradient-to-br from-white to-gray-50 dark:from-gray-900 dark:to-gray-800 p-6 rounded-lg shadow-inner border border-indigo-200 dark:border-indigo-800 h-[calc(100vh-18rem)] overflow-y-auto mb-6"
       >
         {messages.map((msg, index) => (
           <div

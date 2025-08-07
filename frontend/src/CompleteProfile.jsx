@@ -34,7 +34,6 @@ const CompleteProfile = () => {
   const [formData, setFormData] = useState({
     name: '',
     phone: '',
-    countryCode: 'IN', // Store ISO country code
     location: '',
     linkedin: '',
     github: '',
@@ -60,7 +59,7 @@ const CompleteProfile = () => {
   })
   const [isWebcamActive, setIsWebcamActive] = useState(false)
   const [enforceOtpVerification, setEnforceOtpVerification] = useState(false)
-  const [otpVerified, setOtpVerified] = useState(false) // Added state for OTP verification
+  const [otpVerified, setOtpVerified] = useState(false)
   const [otp, setOtp] = useState('')
   const [otpSent, setOtpSent] = useState(false)
   const [otpExpiry, setOtpExpiry] = useState(null)
@@ -84,9 +83,6 @@ const CompleteProfile = () => {
         setFormData({
           name: data.name || '',
           phone: data.phone || '',
-          countryCode: data.location
-            ? data.location.split(',').pop()?.trim().toUpperCase() || 'IN'
-            : 'IN',
           location: data.location || '',
           linkedin: data.linkedin || '',
           github: data.github || '',
@@ -198,7 +194,7 @@ const CompleteProfile = () => {
         if (timeLeft === 0) {
           setOtpSent(false)
           setOtp('')
-          setOtpVerified(false) // Reset OTP verification on expiry
+          setOtpVerified(false)
           setMessage({
             text: 'OTP has expired. Please request a new OTP.',
             type: 'error',
@@ -254,7 +250,7 @@ const CompleteProfile = () => {
       })
       const result = await response.json()
       if (response.ok) {
-        setOtpVerified(true) // Update OTP verification status
+        setOtpVerified(true)
         setMessage({
           text: 'OTP verified successfully! You can now update your profile.',
           type: 'success',
@@ -309,7 +305,7 @@ const CompleteProfile = () => {
         }
       }
     } else if (name === 'location') {
-      sanitizedValue = value.trim()
+      sanitizedValue = value // <-- allow spaces anywhere, do not trim
       // Update countryCode based on location
       const country = sanitizedValue.split(',').pop()?.trim().toUpperCase()
       if (country && /^[A-Z]{2}$/.test(country)) {
@@ -321,14 +317,11 @@ const CompleteProfile = () => {
   }
 
   const handlePhoneChange = (value, data) => {
-    const formattedPhone = `+${value.replace(/^\+/, '')}` // Ensure single '+' prefix
-    const countryCode = data.countryCode
-      ? data.countryCode.toUpperCase()
-      : formData.countryCode
+    // Always use +91 and IN
+    const formattedPhone = `+${value.replace(/^\+/, '')}`
     setFormData((prevState) => ({
       ...prevState,
       phone: formattedPhone,
-      countryCode,
     }))
     const e164Regex = /^\+\d{1,15}$/
     if (
@@ -343,7 +336,7 @@ const CompleteProfile = () => {
     } else {
       setMessage({ text: '', type: '' })
     }
-    console.log(`Updated phone: ${formattedPhone}, countryCode: ${countryCode}`)
+    console.log(`Updated phone: ${formattedPhone}`)
   }
 
   const handleOtpChange = (e) => {
@@ -593,6 +586,14 @@ const CompleteProfile = () => {
       console.error('Validation failed: No resume uploaded')
       return false
     }
+    if (!candidate.profile_picture && !profilePicture) {
+      setMessage({
+        text: 'Please upload a clear face image for your profile picture. This will be used for verification during tests.',
+        type: 'error',
+      })
+      console.error('Validation failed: No profile picture uploaded')
+      return false
+    }
     console.log('Form validation passed')
     return true
   }
@@ -654,14 +655,33 @@ const CompleteProfile = () => {
       const errorMessage =
         error.response?.data?.error ||
         'Failed to update profile due to a network error. Please try again.'
-      if (errorMessage.toLowerCase().includes('linkedin')) {
+      // Improved error handling for phone number issues
+      if (
+        errorMessage
+          .toLowerCase()
+          .includes('already registered with another account')
+      ) {
+        setMessage({
+          text: errorMessage,
+          type: 'error',
+        })
+      } else if (
+        errorMessage
+          .toLowerCase()
+          .includes('does not match the phone number you entered')
+      ) {
+        setMessage({
+          text: errorMessage,
+          type: 'error',
+        })
+      } else if (errorMessage.toLowerCase().includes('linkedin')) {
         setMessage({
           text: 'Invalid LinkedIn URL. Please ensure it starts with https://www.linkedin.com/in/ (e.g., https://www.linkedin.com/in/your-profile).',
           type: 'error',
         })
       } else if (errorMessage.toLowerCase().includes('phone number')) {
         setMessage({
-          text: 'Failed to parse phone number. Please ensure it includes a valid country code (e.g., +919876543210).',
+          text: errorMessage,
           type: 'error',
         })
       } else {
@@ -725,6 +745,10 @@ const CompleteProfile = () => {
                 />
               </label>
             </div>
+            <p className="text-sm text-gray-500 dark:text-gray-400 text-center">
+              Please upload a clear face image for your profile picture. This
+              will be used for verification during tests.
+            </p>
             <div className="text-center">
               <h2 className="text-xl font-bold text-gray-900 dark:text-white">
                 {formData.name || 'Your Name'}
@@ -751,8 +775,12 @@ const CompleteProfile = () => {
                 Top Skills
               </h3>
               <div className="flex flex-wrap gap-2">
-                {candidate?.skills && candidate.skills.length > 0 ? (
-                  candidate.skills.slice(0, 5).map(({ skill_name }, i) => (
+                {(candidate?.skills && candidate.skills.length > 0
+                  ? candidate.skills
+                  : []
+                )
+                  .slice(0, 5)
+                  .map(({ skill_name }, i) => (
                     <span
                       key={skill_name}
                       className={`px-3 py-1 rounded-full text-sm font-medium bg-gradient-to-r ${
@@ -767,8 +795,8 @@ const CompleteProfile = () => {
                     >
                       {skill_name}
                     </span>
-                  ))
-                ) : (
+                  ))}
+                {(!candidate?.skills || candidate.skills.length === 0) && (
                   <span className="text-sm text-gray-500 dark:text-gray-400">
                     No skills added yet.
                   </span>
@@ -987,8 +1015,10 @@ const CompleteProfile = () => {
                       Phone Number
                     </span>
                   </label>
+
                   <PhoneInput
                     country={'in'}
+                    onlyCountries={['in']}
                     value={formData.phone}
                     onChange={handlePhoneChange}
                     inputProps={{
@@ -1000,8 +1030,12 @@ const CompleteProfile = () => {
                       'aria-label': 'Phone Number',
                       'aria-describedby': 'phone-error',
                     }}
-                    placeholder="Enter phone number with country code"
+                    placeholder="Enter phone number"
+                    disableDropdown={true}
                   />
+                  <p className="text-sm text-gray-500 dark:text-gray-400">
+                    Please include +91 as the country code.
+                  </p>
                 </div>
               </div>
               <div>

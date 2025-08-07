@@ -141,45 +141,34 @@ def generate_questions_prompt(skill, subskills, difficulty_band, job_description
     return prompt.strip()
 
 def generate_single_question_prompt(skill, subskills, difficulty_band, job_description="", previous_questions=None):
+    """Generate a concise prompt for a single MCQ based on skill, subskills, and difficulty."""
     difficulty_descriptor = {
-        "good": "easy and theory-based, suitable for beginners. Can include data structures and algorithms questions.",
-        "better": "moderate difficulty, mixing theory and practical concepts, can be DSA-based or practical.",
-        "perfect": "challenging, practical, and suitable for advanced learners, mostly code snippet-based to test practical skills."
+        "good": "easy, theory-based, suitable for beginners, may include DSA.",
+        "better": "moderate, mixing theory and practical, may include DSA or code.",
+        "perfect": "challenging, practical, code snippet-based for advanced learners."
     }[difficulty_band]
-    description_context = f"The job description is: {job_description}" if job_description else "There is no specific job description provided."
+    job_context = f"Job description: {job_description}" if job_description else "No job description provided."
     
     avoid_section = ""
     if previous_questions:
-        avoid_section = "Avoid generating questions similar in content or concept to the following previously asked questions:\n"
-        for i, q in enumerate(previous_questions[:5], 1):
-            avoid_section += f"Previous Question {i}:\n{q['question']}\n"
-            avoid_section += "\n".join(f"({chr(65+i)}) {opt}" for i, opt in enumerate(q['options']))
-            avoid_section += f"\nCorrect Answer: ({q['correct_answer']})\n\n"
+        avoid_section = "Avoid questions similar to these:\n" + "\n".join(
+            f"Q{i}: {q['question']}\nOptions: {', '.join(q['options'])}\nAnswer: {q['correct_answer']}"
+            for i, q in enumerate(previous_questions[:3], 1)
+        ) + "\n"
     
     prompt = f"""
-    {description_context}
-    Generate a single unique multiple-choice question (MCQ) on the skill '{skill}' and its subskills: {", ".join(subskills)}.
-    The question should be {difficulty_descriptor}. Include a code snippet if applicable for 'better' or 'perfect' bands.
-    Guidelines:
-    1. The question must be unique, concise, and distinct from any previous questions.
-    2. Cover a topic from the skill or subskills provided.
-    3. The MCQ must have exactly four options labeled 'A', 'B', 'C', 'D'.
-    4. The correct_answer must be a string and exactly one of 'A', 'B', 'C', 'D'.
-    5. All fields (question, option_a, option_b, option_c, option_d, correct_answer) must be non-empty strings.
+    {job_context}
+    Generate one unique MCQ for skill '{skill}' (subskills: {', '.join(subskills)}).
+    The question must be {difficulty_descriptor}.
+    Include a code snippet for 'better' or 'perfect' bands if relevant.
+    Requirements:
+    1. Question must be unique, concise, and cover the skill/subskills.
+    2. Provide exactly 4 options labeled 'A', 'B', 'C', 'D'.
+    3. `correct_answer` must be exactly 'A', 'B', 'C', or 'D' (single uppercase character).
+    4. All fields (question, option_a, option_b, option_c, option_d, correct_answer) must be non-empty strings.
+    5. For code snippets, use escaped quotes (\\\") and replace newlines with spaces.
     {avoid_section}
-    6. Return the response as a JSON object with fields: 'question', 'option_a', 'option_b', 'option_c', 'option_d', 'correct_answer'.
-    7. For code snippets in questions, use escaped quotes (\\\") and replace newlines with spaces to ensure valid JSON.
-    8. Example format:
-    {{
-        "question": "What will this code print? driver.findElement(By.xpath(\\\"//input[@type='submit']\\\")).click();",
-        "option_a": "Submits a form",
-        "option_b": "Clicks a button",
-        "option_c": "Enters text",
-        "option_d": "Clears a field",
-        "correct_answer": "B"
-    }}
-    9. Return ONLY the JSON object as a string, with no additional text, no code block markers (```), and no extra whitespace outside the JSON structure.
-    10. Ensure the correct_answer is explicitly one of 'A', 'B', 'C', or 'D' to avoid validation errors.
+    Return a JSON object: {{"question": "", "option_a": "", "option_b": "", "option_c": "", "option_d": "", "correct_answer": ""}}.
     """
     return prompt.strip()
 
@@ -283,7 +272,67 @@ def parse_response(raw_text):
         print(f"⚠️ Error parsing response: {e} - Raw text: {raw_text[:100]}...")
         return []
 
-@timeout_with_context(15)
+def parse_single_question_response(raw_text):
+    """Parse a single question from raw JSON response."""
+    print(f"📜 Raw response: {raw_text[:500]}... (truncated)")
+    try:
+        raw_text = raw_text.strip()
+        raw_text = re.sub(r'^```(json|python)?\s*\n', '', raw_text, flags=re.MULTILINE)
+        raw_text = re.sub(r'\n```$', '', raw_text, flags=re.MULTILINE)
+        
+        question_data = json.loads(raw_text)
+        if not isinstance(question_data, dict):
+            print(f"Invalid response format: Expected JSON object, got {type(question_data)}")
+            return None
+        
+        # Validate required fields
+        required_fields = ['question', 'option_a', 'option_b', 'option_c', 'option_d', 'correct_answer']
+        if not all(field in question_data for field in required_fields):
+            missing = [f for f in required_fields if f not in question_data]
+            print(f"Invalid question format: Missing fields {missing} in {json.dumps(question_data)}")
+            return None
+        
+        # Validate correct_answer
+        correct_answer = question_data['correct_answer']
+        if not isinstance(correct_answer, str) or correct_answer not in ['A', 'B', 'C', 'D']:
+            print(f"Invalid correct_answer: '{correct_answer}' (type: {type(correct_answer)}) in {json.dumps(question_data)}")
+            # Attempt to fix lowercase answers
+            if isinstance(correct_answer, str) and correct_answer.upper() in ['A', 'B', 'C', 'D']:
+                print(f"Converting lowercase correct_answer '{correct_answer}' to '{correct_answer.upper()}'")
+                question_data['correct_answer'] = correct_answer.upper()
+            else:
+                return None
+        
+        # Validate that all fields are strings and non-empty
+        for field in required_fields:
+            if not isinstance(question_data[field], str) or not question_data[field].strip():
+                print(f"Invalid field: {field} is {type(question_data[field])} or empty in {json.dumps(question_data)}")
+                return None
+        
+        # Clean entries
+        parsed = {
+            "question": clean_entry(question_data['question']),
+            "option_a": clean_entry(question_data['option_a']),
+            "option_b": clean_entry(question_data['option_b']),
+            "option_c": clean_entry(question_data['option_c']),
+            "option_d": clean_entry(question_data['option_d']),
+            "correct_answer": question_data['correct_answer'],
+            "options": [
+                clean_entry(question_data['option_a']),
+                clean_entry(question_data['option_b']),
+                clean_entry(question_data['option_c']),
+                clean_entry(question_data['option_d'])
+            ]
+        }
+        return parsed
+    except json.JSONDecodeError as e:
+        print(f"⚠️ Failed to parse JSON response: {e} - Raw text: {raw_text[:100]}...")
+        return None
+    except Exception as e:
+        print(f"⚠️ Error parsing response: {e} - Raw text: {raw_text[:100]}...")
+        return None
+
+@timeout_with_context(10)
 def generate_single_question_with_timeout(skill_name, difficulty_band, job_id, job_description="", used_questions=None):
     """Generate a single question with timeout."""
     skill = Skill.query.filter_by(name=skill_name).first()
@@ -307,12 +356,12 @@ def generate_single_question_with_timeout(skill_name, difficulty_band, job_id, j
             response = chat.send_message(prompt)
             
             if response and isinstance(response.text, str):
-                questions = parse_response(response.text)
-                if not questions:
+                parsed = parse_single_question_response(response.text)
+                print(parsed)
+                if not parsed:
                     print(f"⚠️ No valid question generated for {skill_name} ({difficulty_band})")
                     continue
                 
-                parsed = questions[0]  # Single question expected
                 mcq = MCQ(
                     job_id=job_id,
                     skill_id=skill_id,
@@ -327,7 +376,7 @@ def generate_single_question_with_timeout(skill_name, difficulty_band, job_id, j
                 db.session.add(mcq)
                 db.session.commit()
                 
-                print(f"✅ Saved real-time question for {skill_name} ({difficulty_band}) to MCQ table")
+                print(f"✅ Saved question for {skill_name} ({difficulty_band})")
                 return {
                     "mcq_id": mcq.mcq_id,
                     "question": parsed["question"],
@@ -343,13 +392,13 @@ def generate_single_question_with_timeout(skill_name, difficulty_band, job_id, j
         except TooManyRequests:
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt * 10
-                print(f"⛔️ Gemini quota exceeded for {skill_name} ({difficulty_band}). Retrying in {wait_time} seconds...")
+                print(f"⛔️ Gemini quota exceeded. Retrying in {wait_time}s...")
                 time.sleep(wait_time)
             else:
-                print(f"⛔️ Gemini quota exceeded after {max_retries} retries for {skill_name} ({difficulty_band}).")
+                print(f"⛔️ Gemini quota exceeded after {max_retries} retries.")
                 return None
         except Exception as e:
-            print(f"⚠️ Error generating single question: {e}")
+            print(f"⚠️ Error generating question: {e}")
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt * 1.5)
                 continue

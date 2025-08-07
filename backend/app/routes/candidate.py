@@ -53,8 +53,11 @@ limiter = Limiter(key_func=get_remote_address)
 # Load spaCy model for fallback resume parsing
 nlp = spacy.load("en_core_web_sm")
 
-def get_country_code(location):
-    """Extract country code from location string (e.g., 'Mumbai, India' -> 'IN')."""
+def get_country_code(location, form_country_code=None):
+    """Extract country code from location string or prefer form_country_code."""
+    if form_country_code and form_country_code in [c.alpha_2 for c in pycountry.countries]:
+        logger.debug(f"Using provided country code: {form_country_code}")
+        return form_country_code
     if not location:
         logger.warning("Location is empty; defaulting to 'IN'")
         return "IN"
@@ -63,7 +66,11 @@ def get_country_code(location):
         country_name = location.split(',')[-1].strip()
         country = pycountry.countries.search_fuzzy(country_name)
         if country:
+            logger.debug(f"Extracted country code {country[0].alpha_2} from location: {location}")
             return country[0].alpha_2
+        logger.warning(f"Could not find country code for {country_name}; defaulting to 'IN'")
+        return "IN"
+    except LookupError:
         logger.warning(f"Could not find country code for {country_name}; defaulting to 'IN'")
         return "IN"
     except Exception as e:
@@ -257,12 +264,14 @@ def normalize_phone_number(phone, country_code="IN"):
     try:
         parsed = phonenumbers.parse(phone, country_code)
         if not phonenumbers.is_valid_number(parsed):
-            logger.error(f"Invalid phone number: {phone}")
-            raise ValueError("Invalid phone number format")
-        return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+            logger.error(f"Invalid phone number: {phone}, country_code={country_code}, details=Invalid format or length")
+            raise ValueError(f"Phone number {phone} is not valid for country code {country_code}")
+        normalized = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+        logger.debug(f"Normalized phone number: {phone} -> {normalized}")
+        return normalized
     except phonenumbers.NumberParseException as e:
-        logger.error(f"Phone number parsing error: {str(e)}")
-        raise ValueError("Failed to parse phone number")
+        logger.error(f"Phone number parsing error: {phone}, country_code={country_code}, error={str(e)}")
+        raise ValueError(f"Failed to parse phone number {phone}: {str(e)}")
 
 def validate_url(url, platform):
     """Validate LinkedIn or GitHub URL format."""
@@ -429,6 +438,7 @@ def infer_proficiency(skill, work_experience, education, projects):
     return proficiency
 
 def verify_faces(profile_file, webcam_file):
+    """Compare profile picture and webcam image for verification."""
     try:
         result = compare_faces_from_files(profile_file, webcam_file)
         confidence = result.get("confidence")
@@ -439,14 +449,14 @@ def verify_faces(profile_file, webcam_file):
         return {
             'verified': result.get("verified", False),
             'similarity': round(similarity, 2),
-            'pending_verification': not result.get("verified", False)  # Flag for pending manual review
+            'pending_verification': not result.get("verified", False)
         }
     except Exception as e:
         logger.error(f"Face comparison error: {str(e)}")
         return {'verified': False, 'similarity': 0.0, 'pending_verification': True}
 
 @candidate_api_bp.route('/auth/send-otp', methods=['POST'])
-@limiter.limit("5 per minute")  # Rate limit OTP requests
+@limiter.limit("5 per minute")
 def send_otp():
     """Send OTP to candidate's email."""
     data = request.get_json()
@@ -541,8 +551,8 @@ def get_profile_by_user(user_id):
         'profile_picture': candidate.profile_picture,
         'camera_image': candidate.camera_image,
         'is_profile_complete': candidate.is_profile_complete,
-        'skills': skills,
-        'requires_otp_verification': candidate.requires_otp_verification
+        'requires_otp_verification': candidate.requires_otp_verification,
+        'skills': skills  # <-- Add this line
     })
 
 @candidate_api_bp.route('/degrees', methods=['GET'])
@@ -622,7 +632,7 @@ def update_profile(user_id):
     resume_file = request.files.get('resume')
     profile_pic_file = request.files.get('profile_picture')
     webcam_image_file = request.files.get('webcam_image')
-    form_country_code = request.form.get('country_code')  # Added to retrieve country code from form
+    form_country_code = request.form.get('country_code')  # Retrieve country code from form
 
     logger.debug(f"Form data: name={form_name}, phone={form_phone}, location={form_location}, linkedin={form_linkedin}, github={form_github}, degree_id={form_degree_id}, degree_branch={form_degree_branch}, passout_year={form_passout_year}, experience={form_experience}, country_code={form_country_code}")
 
@@ -661,28 +671,82 @@ def update_profile(user_id):
 
     # Normalize phone numbers with robust country code handling
     try:
-        country_code = form_country_code if form_country_code and form_country_code in [c.alpha_2 for c in pycountry.countries] else get_country_code(form_location)
+        country_code = get_country_code(form_location, form_country_code)
         normalized_form_phone = normalize_phone_number(form_phone, country_code)
+        if not normalized_form_phone:
+            logger.error(f"Failed to normalize phone number: {form_phone}")
+            return jsonify({'error': 'Invalid phone number format.'}), 400
+
+        # Check if phone number is already in use by another candidate
+        if normalized_form_phone != candidate.phone:
+            existing_candidate = Candidate.query.filter(
+                Candidate.phone == normalized_form_phone,
+                Candidate.user_id != user_id
+            ).first()
+            if existing_candidate:
+                logger.error(f"Phone number already in use: {normalized_form_phone}")
+                return jsonify({'error': 'This phone number is already registered by another user.'}), 400
+
+        # Validate phone number against resume (new or existing)
         resume_phone = None
+        parsed_data = None
+        resume_json_entry = ResumeJson.query.filter_by(candidate_id=candidate.candidate_id).order_by(ResumeJson.created_at.desc()).first()
+
         if resume_file:
+            # New resume uploaded
             resume_text = extract_text_from_pdf(resume_file)
-            parsed_data = parse_json_output(analyze_resume(resume_text))
+            gemini_output = analyze_resume(resume_text)
+            parsed_data = parse_json_output(gemini_output) if gemini_output else None
             if parsed_data:
                 resume_phone = parsed_data.get('phone')
-                if resume_phone:
-                    normalized_resume_phone = normalize_phone_number(resume_phone, country_code)
-                    if normalized_resume_phone and normalized_form_phone != normalized_resume_phone:
-                        logger.error(f"Phone mismatch: form_phone={normalized_form_phone}, resume_phone={normalized_resume_phone}")
-                        return jsonify({'error': 'Phone number in resume does not match the provided phone number.'}), 400
+        elif resume_json_entry and resume_json_entry.raw_resume:
+            # Use existing ResumeJson
+            logger.debug(f"Using existing ResumeJson for candidate_id={candidate.candidate_id}")
+            if isinstance(resume_json_entry.raw_resume, dict):
+                parsed_data = resume_json_entry.raw_resume
+            elif isinstance(resume_json_entry.raw_resume, str):
+                try:
+                    parsed_data = json.loads(resume_json_entry.raw_resume)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse existing ResumeJson: {str(e)}")
+                    parsed_data = None
+            if parsed_data:
+                resume_phone = parsed_data.get('phone')
+        elif candidate.resume:
+            # Re-parse existing resume from GCS
+            logger.debug(f"Fetching existing resume from GCS for candidate_id={candidate.candidate_id}")
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(os.getenv("GCS_BUCKET_NAME", "gen-ai-quiz"))
+            blob = bucket.get_blob(f"uploads/{candidate.resume}")
+            if not blob:
+                logger.error(f"Resume not found in GCS: uploads/{candidate.resume}")
+                return jsonify({'error': 'Existing resume not found in storage. Please upload a new resume.'}), 404
+
+            resume_content = BytesIO()
+            blob.download_to_file(resume_content)
+            resume_content.seek(0)
+            resume_text = extract_text_from_pdf(resume_content)
+            gemini_output = analyze_resume(resume_text)
+            parsed_data = parse_json_output(gemini_output) if gemini_output else None
+            if parsed_data:
+                resume_phone = parsed_data.get('phone')
+
+        # Validate phone number match
+        if resume_phone:
+            normalized_resume_phone = normalize_phone_number(resume_phone, country_code)
+            if normalized_resume_phone and normalized_form_phone != normalized_resume_phone:
+                logger.error(f"Phone mismatch: form_phone={normalized_form_phone}, resume_phone={normalized_resume_phone}")
+                return jsonify({'error': 'Phone number in resume does not match the provided phone number.'}), 400
+        else:
+            logger.error("No phone number found in resume")
+            return jsonify({'error': 'No phone number found in resume. Please ensure the resume contains a valid phone number.'}), 400
+
     except ValueError as e:
         logger.error(f"Phone normalization error: {str(e)}")
         return jsonify({'error': f'Failed to parse phone number: {str(e)}'}), 400
 
     # Process resume and validate against form data
-    parsed_data = None
     resume_filename = candidate.resume
-    resume_json_entry = ResumeJson.query.filter_by(candidate_id=candidate.candidate_id).order_by(ResumeJson.created_at.desc()).first()
-
     if resume_file:
         try:
             logger.debug(f"Processing new resume file for candidate_id={candidate.candidate_id}")
@@ -727,63 +791,24 @@ def update_profile(user_id):
         except ValueError as e:
             logger.error(f"Resume processing error: {str(e)}")
             return jsonify({'error': str(e)}), 400
-    elif candidate.resume:
-        if resume_json_entry and resume_json_entry.raw_resume:
-            logger.debug(f"Raw resume type: {type(resume_json_entry.raw_resume)}")
-            if isinstance(resume_json_entry.raw_resume, dict):
-                parsed_data = resume_json_entry.raw_resume
-                logger.debug(f"Using existing ResumeJson data (already a dict) for candidate_id={candidate.candidate_id}")
-            elif isinstance(resume_json_entry.raw_resume, str):
-                try:
-                    parsed_data = json.loads(resume_json_entry.raw_resume)
-                    logger.debug(f"Using existing ResumeJson data (parsed from string) for candidate_id={candidate.candidate_id}")
-                except json.JSONDecodeError as e:
-                    logger.warning(f"Failed to parse existing ResumeJson data: {str(e)}")
-                    parsed_data = None
-            else:
-                logger.warning(f"Unexpected raw_resume type: {type(resume_json_entry.raw_resume)}")
-                parsed_data = None
+    elif candidate.resume and not parsed_data:
+        try:
+            logger.debug(f"Fetching existing resume from GCS for candidate_id={candidate.candidate_id}")
+            storage_client = storage.Client()
+            bucket = storage_client.bucket(os.getenv("GCS_BUCKET_NAME", "gen-ai-quiz"))
+            blob = bucket.get_blob(f"uploads/{candidate.resume}")
+            if not blob:
+                logger.error(f"Resume not found in GCS: uploads/{candidate.resume}")
+                return jsonify({'error': 'Existing resume not found in storage. Please upload a new resume.'}), 404
 
-        if not parsed_data:
-            try:
-                logger.debug(f"Fetching existing resume from GCS for candidate_id={candidate.candidate_id}")
-                storage_client = storage.Client()
-                bucket = storage_client.bucket(os.getenv("GCS_BUCKET_NAME", "gen-ai-quiz"))
-                blob = bucket.get_blob(f"uploads/{candidate.resume}")
-                if not blob:
-                    logger.error(f"Resume not found in GCS: uploads/{candidate.resume}")
-                    return jsonify({'error': 'Existing resume not found in storage. Please upload a new resume.'}), 404
-
-                resume_content = BytesIO()
-                blob.download_to_file(resume_content)
-                resume_content.seek(0)
-                logger.debug(f"Downloaded resume from GCS: uploads/{candidate.resume}")
-
-                resume_text = extract_text_from_pdf(resume_content)
-                gemini_output = analyze_resume(resume_text)
-                parsed_data = parse_json_output(gemini_output) if gemini_output else None
-                if not parsed_data:
-                    logger.warning("Failed to parse existing resume; using form data as fallback")
-                    parsed_data = {
-                        'name': form_name,
-                        'phone': form_phone,
-                        'Work Experience': [],
-                        'Skills': {'Technical Skills': [], 'Soft Skills': [], 'Tools': []},
-                        'Projects': [],
-                        'Education': []
-                    }
-
-                cleaned_resume_string = json.dumps(parsed_data)
-                if resume_json_entry:
-                    resume_json_entry.raw_resume = cleaned_resume_string
-                else:
-                    resume_json_entry = ResumeJson(
-                        candidate_id=candidate.candidate_id,
-                        raw_resume=cleaned_resume_string
-                    )
-                    db.session.add(resume_json_entry)
-            except Exception as e:
-                logger.error(f"Failed to process existing resume from GCS: {str(e)}")
+            resume_content = BytesIO()
+            blob.download_to_file(resume_content)
+            resume_content.seek(0)
+            resume_text = extract_text_from_pdf(resume_content)
+            gemini_output = analyze_resume(resume_text)
+            parsed_data = parse_json_output(gemini_output) if gemini_output else None
+            if not parsed_data:
+                logger.warning("Failed to parse existing resume; using form data as fallback")
                 parsed_data = {
                     'name': form_name,
                     'phone': form_phone,
@@ -792,9 +817,26 @@ def update_profile(user_id):
                     'Projects': [],
                     'Education': []
                 }
-    else:
-        logger.error("No resume provided and no existing resume found")
-        return jsonify({'error': 'A resume file is required.'}), 400
+
+            cleaned_resume_string = json.dumps(parsed_data)
+            if resume_json_entry:
+                resume_json_entry.raw_resume = cleaned_resume_string
+            else:
+                resume_json_entry = ResumeJson(
+                    candidate_id=candidate.candidate_id,
+                    raw_resume=cleaned_resume_string
+                )
+                db.session.add(resume_json_entry)
+        except Exception as e:
+            logger.error(f"Failed to process existing resume from GCS: {str(e)}")
+            parsed_data = {
+                'name': form_name,
+                'phone': form_phone,
+                'Work Experience': [],
+                'Skills': {'Technical Skills': [], 'Soft Skills': [], 'Tools': []},
+                'Projects': [],
+                'Education': []
+            }
 
     resume_name = parsed_data.get('name', '') if parsed_data else ''
     resume_phone = parsed_data.get('phone', '') if parsed_data else ''
@@ -802,8 +844,13 @@ def update_profile(user_id):
         logger.error(f"Name mismatch: form_name={form_name}, resume_name={resume_name}")
         return jsonify({'error': 'Name in resume does not match the provided name.'}), 400
 
-    # Check for location change to enforce OTP verification
-    if candidate.location and form_location and not compare_strings(candidate.location, form_location):
+    # Check for location change to enforce OTP verification, but skip for first-time profile setup
+    if (
+        candidate.is_profile_complete
+        and candidate.location
+        and form_location
+        and not compare_strings(candidate.location, form_location)
+    ):
         candidate.requires_otp_verification = True
         db.session.commit()
         logger.warning(f"Location change detected for user_id: {user_id}. OTP verification required.")
@@ -921,7 +968,7 @@ def update_profile(user_id):
         db.session.rollback()
         logger.error(f"Database integrity error: {str(e)}")
         if 'phone' in str(e).lower():
-            return jsonify({'error': 'This phone number is already in use.'}), 400
+            return jsonify({'error': 'This phone number is already registered by another user.'}), 400
         elif 'linkedin' in str(e).lower():
             return jsonify({'error': 'This LinkedIn profile is already in use.'}), 400
         elif 'github' in str(e).lower():

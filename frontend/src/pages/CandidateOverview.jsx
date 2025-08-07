@@ -128,24 +128,24 @@ const CandidateOverview = () => {
   let skillGrowthData = null
   let skillGrowthOptions = null
 
-  if (candidate?.skills && candidate.skills.length > 0) {
+  const skillsArr = Array.isArray(candidate?.skills) ? candidate.skills : []
+
+  if (skillsArr.length > 0) {
     // Assume each skill object: { skill_id, skill_name, category, proficiency, history: [{date, value}] }
     // Check if any skill has history data
-    const hasHistory = candidate.skills.some(
+    const hasHistory = skillsArr.some(
       (skill) => Array.isArray(skill.history) && skill.history.length > 0
     )
     if (hasHistory) {
       // If skills have history, plot growth over time for each skill
       const allDates = Array.from(
         new Set(
-          candidate.skills.flatMap((skill) =>
-            (skill.history || []).map((h) => h.date)
-          )
+          skillsArr.flatMap((skill) => (skill.history || []).map((h) => h.date))
         )
       ).sort()
       skillGrowthData = {
         labels: allDates,
-        datasets: candidate.skills.map((skill, idx) => ({
+        datasets: skillsArr.map((skill, idx) => ({
           label: `${skill.skill_name} (Current: ${getProficiencyLabel(
             skill.proficiency
           )})`,
@@ -206,11 +206,11 @@ const CandidateOverview = () => {
     } else {
       // No history, show current proficiency for each skill
       skillGrowthData = {
-        labels: candidate.skills.map((s) => s.skill_name),
+        labels: skillsArr.map((s) => s.skill_name),
         datasets: [
           {
             label: 'Current Proficiency',
-            data: candidate.skills.map((s) => s.proficiency || 0),
+            data: skillsArr.map((s) => s.proficiency || 0),
             borderColor: '#6366f1',
             backgroundColor: 'rgba(99,102,241,0.2)',
             fill: true,
@@ -783,8 +783,8 @@ const CandidateOverview = () => {
                 Skills
               </h4>
               <div className="flex flex-wrap gap-2 mt-2 justify-center">
-                {candidate.skills?.length > 0 ? (
-                  candidate.skills.map(({ skill_name, proficiency }, i) => (
+                {skillsArr.length > 0 ? (
+                  skillsArr.map(({ skill_name, proficiency }, i) => (
                     <span
                       key={skill_name}
                       className={`px-3 py-1 rounded-full text-sm font-medium ${getSkillColor(
